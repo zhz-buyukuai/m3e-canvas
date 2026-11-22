@@ -50,6 +50,7 @@ import {
   frameLengthOf,
   frameRadius,
   frameSizeOf,
+  groupBounds,
   groupsInFrame,
   isPhoneFrame,
   normalizeTheme,
@@ -76,6 +77,8 @@ import { t, useLang } from "@/lib/i18n";
 import { constrainModalRails, modalRailOf, updateRail } from "@/lib/rail";
 import { pinOf } from "@/lib/tidy";
 import { railMotionTargets } from "@/lib/railView";
+import type { TimeState } from "@/lib/timeLive";
+import { Surface, liveLook, surfaceOf } from "./PreviewSurface";
 
 const EASE = [0.2, 0, 0, 1] as const;
 const SLIDE_MS = 0.42;
@@ -206,6 +209,7 @@ function Tappable({
   railAnimating,
   panY,
   easeWidth,
+  pointerEvents,
 }: {
   item: Item;
   p: Palette;
@@ -227,6 +231,8 @@ function Tappable({
   panY?: boolean;
   /** this preview part is allowed to animate between measured and fixed widths */
   easeWidth?: boolean;
+  /** keep visible parts interactive when their group's empty space lets input through */
+  pointerEvents?: "auto";
 }) {
   const lang = useLang();
   const [pressed, setPressed] = useState(false);
@@ -583,7 +589,7 @@ function Tappable({
         endRipple(e.pointerId);
       }}
       onClick={onPick ? () => onMenu?.(!menu) : onTap}
-      style={{ cursor: live || onValue ? "pointer" : "default", display: "flex", position: "relative", touchAction: scrollRow ? (panY ? "pan-x pan-y" : "pan-x") : panY ? "pan-y" : "none" }}
+      style={{ cursor: live || onValue ? "pointer" : "default", display: "flex", position: "relative", pointerEvents, touchAction: scrollRow ? (panY ? "pan-x pan-y" : "pan-x") : panY ? "pan-y" : "none" }}
     >
       <M3Node item={item} palette={p} widths={widths} radii={radii} interactive={false} pressed={pressed && !onValue && !boxless} tabScroll={scrollRow ? tabScroll : undefined} easeWidth={easeWidth} />
       {live && !boxless && !segmented && TAP_LIT.includes(item.kind) && (
@@ -768,7 +774,14 @@ function Screen({
   const [menuId, setMenuId] = useState<string | null>(null);
   /* a folding FAB folds on the way down and stays folded until the body scrolls back up */
   const [fabFolded, setFabFolded] = useState(false);
-  const fabScrollTop = useRef(0);
+  const [navHidden, setNavHidden] = useState(false);
+  /* the time each time picker has been set to, and the dialogs and pickers closed on this visit
+     (a screen opened again starts with them shown) */
+  const [times, setTimes] = useState<Record<string, TimeState>>({});
+  const [closing, setClosing] = useState<Set<string>>(() => new Set());
+  const [closed, setClosed] = useState<Set<string>>(() => new Set());
+  const bodyScrollTop = useRef(0);
+  const pointerScroll = useRef(false);
   const [railStates, setRailStates] = useState<Record<string, boolean>>({});
   const [railMotion, setRailMotion] = useState<(ReturnType<typeof railMotionTargets> & { animate: boolean }) | null>(null);
   const lang = useLang();
@@ -798,12 +811,44 @@ function Screen({
     }
   }
   const lift = (g: Group) => pins.get(g.id) ?? 0;
+  /* a closed part fades out first and is then gone until the screen is opened again */
+  const closePart = (id: string) => {
+    setClosing((s) => new Set(s).add(id));
+    setTimeout(() => {
+      setClosed((s) => new Set(s).add(id));
+      setClosing((s) => {
+        const next = new Set(s);
+        next.delete(id);
+        return next;
+      });
+    }, reducedMotion ? 0 : 150);
+  };
+  /* a navigation bar that hides on scroll takes what floats over it at the foot along: a FAB
+   * above it moves down by the bar's height and comes back up with it, so it keeps its place
+   * above the bar's top edge */
+  const footLift = length - viewH;
+  const hidingNav = scrolls ? shownGroups.find((g) => pins.get(g.id) === footLift && g.items.some((it) => it.kind === "bottomNav" && it.hideOnScroll)) : undefined;
+  const navTop = hidingNav ? groupBounds(hidingNav, widths).t : 0;
+  const navDrop = hidingNav ? sizeOf(hidingNav.items.find((it) => it.kind === "bottomNav")!, widths).h : 0;
+  const followsNav = (g: Group) => !!hidingNav && g.id !== hidingNav.id && pins.get(g.id) === footLift && groupBounds(g, widths).b <= navTop + 1;
   const hasFoldingFab = shownGroups.some((g) => g.items.some((it) => it.kind === "extendedFab" && it.collapseOnScroll));
-  const onBodyScroll = (e: { currentTarget: { scrollTop: number } }) => {
-    const top = e.currentTarget.scrollTop;
-    const down = top - fabScrollTop.current;
-    fabScrollTop.current = top;
+  const showNavigation = () => {
+    pointerScroll.current = false;
+    setNavHidden(false);
+  };
+  const onBodyScroll = (e: { currentTarget: { scrollTop: number; scrollHeight: number; clientHeight: number } }) => {
+    const body = e.currentTarget;
+    // Body parts can extend past the authored screen length, so measure the real range.
+    // Ignore elastic overscroll so bouncing at an edge cannot reverse the direction.
+    const top = clamp(body.scrollTop, 0, body.scrollHeight - body.clientHeight);
+    const down = top - bodyScrollTop.current;
+    bodyScrollTop.current = top;
     if (hasFoldingFab && down !== 0) setFabFolded(down > 0);
+    // Only direct wheel/touch scrolling hides a bar. Preserve indicated focus
+    // without pinning it open after a pointer click.
+    const focusedNav = screenRef.current?.querySelector("[data-scroll-nav] :focus-visible");
+    if (!pointerScroll.current || focusedNav || top === 0) setNavHidden(false);
+    else if (down !== 0) setNavHidden(down > 0);
   };
   const hasModal = modalIds.size > 0;
   const modalActive = interactive && hasModal;
@@ -900,6 +945,9 @@ function Screen({
           data-scroll-body
           className="m3-hidden-scrollbar"
           onScroll={onBodyScroll}
+          onWheelCapture={(e) => { if (e.deltaY !== 0) pointerScroll.current = true; }}
+          onTouchMoveCapture={() => { pointerScroll.current = true; }}
+          onScrollEnd={() => { pointerScroll.current = false; }}
           style={{ position: "absolute", inset: 0, overflowX: "hidden", overflowY: "auto", overscrollBehavior: "contain", touchAction: "pan-y" }}
         >
           <div style={{ position: "relative", height: length }}>{nodes.filter((_, i) => !pins.has(shownGroups[i].id))}</div>
@@ -920,6 +968,7 @@ function Screen({
       aria-modal={modalActive ? true : undefined}
       aria-label={modalActive ? t("railState", lang) : frame.name || t("screen", lang)}
       tabIndex={-1}
+      onKeyDownCapture={showNavigation}
       /* the scrim and the pointer guard follow the rail itself, so a peek shows the modal
        * state as authored; the root's inert keeps a non-interactive screen from acting on it */
       onPointerDown={(e) => { if (hasModal) e.stopPropagation(); }}
@@ -945,6 +994,13 @@ function Screen({
            stays where the author put it and the sheet grows into the room above */
         const rising = g.items.length === 1 && splitOpens(g.items[0]) && flipped.has(g.items[0].id) && splitMenuRisesAt(g.items[0], g.y, frame);
         const riseH = rising ? sizeOf({ ...g.items[0], [fabOpen]: undefined }, widths).h : 0;
+        // A hidden bar leaves its layout slot behind. Let input reach the body through
+        // that slot and the group's empty space; visible siblings opt back in below.
+        const passThrough = scrolls && navHidden && g.items.some((it) => (it.kind === "bottomNav" || it.kind === "topAppBar") && it.hideOnScroll);
+        /* the same motion as the bar's own slide */
+        const follow = followsNav(g)
+          ? { transform: navHidden ? `translateY(${navDrop}px)` : undefined, transition: `transform ${reducedMotion || !pointerScroll.current ? 0 : 200}ms cubic-bezier(${EASE.join(", ")})` }
+          : null;
         return (
         <div
           key={g.id}
@@ -955,7 +1011,7 @@ function Screen({
           inert={hasModal && !g.items.some((it) => modalIds.has(it.id))}
           style={
             g.free
-              ? { position: "absolute", left: g.x - frame.x, top: g.y - frame.y - lift(g), zIndex: g.items.some((it) => modalIds.has(it.id)) ? 4 : g.items.some((it) => it.id === menuId) ? 2 : undefined }
+              ? { position: "absolute", left: g.x - frame.x, top: g.y - frame.y - lift(g), ...follow, pointerEvents: passThrough ? "none" : undefined, zIndex: g.items.some((it) => modalIds.has(it.id)) ? 4 : g.items.some((it) => it.id === menuId) ? 2 : undefined }
               : {
                   position: "absolute",
                   left: g.x - frame.x + (fabCorner?.w ?? 0),
@@ -966,6 +1022,8 @@ function Screen({
                   flexDirection: g.axis === "x" ? "row" : "column",
                   alignItems: g.axis === "x" ? "center" : "stretch",
                   gap: GAP,
+                  ...follow,
+                  pointerEvents: passThrough ? "none" : undefined,
                 }
           }
         >
@@ -992,12 +1050,14 @@ function Screen({
                   ? uniformRadii(conn.outer)
                   : baseRadii(it);
             const act = it.action;
+            if (closed.has(it.id)) return null;
             let shown = flipped.has(it.id) ? flippedLook(it) : it;
             /* the menu drops below the button, or rises above it where the screen runs out */
             if (splitOpens(shown) && flipped.has(it.id)) shown = { ...shown, [menuUp]: splitMenuRisesAt(it, g.y, frame) };
             if (it.kind === "navRail" && pins.has(g.id) && (shown.size2 ?? 0) > viewH) shown = { ...shown, size2: viewH };
             if (it.kind === "slider" && values[it.id] !== undefined) shown = { ...shown, value: values[it.id] };
             if (it.kind === "select" && values[it.id] !== undefined) shown = { ...shown, selected: values[it.id] };
+            shown = liveLook(shown, times[it.id]);
             const navKind = it.kind === "bottomNav" || it.kind === "navRail" || it.kind === "tabs";
             /* bars with the same destinations are one bar to the visitor: the choice follows them across screens */
             const navKey = navKind ? `nav:${it.kind}:${(it.tabs ?? []).map((t) => t.label).join("|")}` : "";
@@ -1022,6 +1082,8 @@ function Screen({
                   }
                 : undefined;
             const slotActions = it.actions;
+            /* a navigation bar slides out below the screen, a top app bar out above it */
+            const scrollingNav = scrolls && (it.kind === "bottomNav" || it.kind === "topAppBar") && !!it.hideOnScroll;
             const node = (
               <Tappable
                 key={it.id}
@@ -1067,8 +1129,27 @@ function Screen({
                 onRailToggle={it.kind === "navRail" && isWideRail(it) ? (animate) => changeRail(it.id, !it.railExpanded, animate) : undefined}
                 panY={scrolls && !pins.has(g.id)}
                 easeWidth={eases}
+                pointerEvents={passThrough && !scrollingNav ? "auto" : undefined}
               />
             );
+            /* a dialog or a picker answers its own controls: Cancel and OK close it, and a time picker is set */
+            const surfaced = surfaceOf(it) ? (
+              <Surface
+                key={it.id}
+                item={it}
+                state={times[it.id]}
+                onState={(next) => setTimes((m) => ({ ...m, [it.id]: next }))}
+                onClose={() => closePart(it.id)}
+                onOk={() => {
+                  closePart(it.id);
+                  if (act) onAction(act);
+                }}
+                closing={closing.has(it.id)}
+                reducedMotion={!!reducedMotion}
+              >
+                {node}
+              </Surface>
+            ) : node;
             /* Keep the authored width as a right-aligned slot. The visual can then narrow from
              * its left edge while its right edge stays exactly where the author placed it. */
             const anchored = eases
@@ -1077,15 +1158,33 @@ function Screen({
                     key={it.id}
                     style={{ width: sizeOf(it, widths).w, display: "flex", justifyContent: "flex-end", flex: "0 0 auto" }}
                   >
-                    {node}
+                    {surfaced}
                   </div>
                 )
-              : node;
-            if (!g.free) return anchored;
+              : surfaced;
+            // Leave the destinations in the accessibility tree, including while offscreen.
+            // Focusing one reveals it immediately, before the next paint.
+            const content = scrollingNav ? (
+              <div
+                key={it.id}
+                data-scroll-nav={it.id}
+                onFocusCapture={showNavigation}
+                style={{ flex: "0 0 auto", overflow: "hidden", pointerEvents: navHidden ? "none" : undefined }}
+              >
+                <motion.div
+                  initial={false}
+                  animate={{ y: navHidden ? (it.kind === "topAppBar" ? "-100%" : "100%") : "0%" }}
+                  transition={{ duration: reducedMotion || !pointerScroll.current ? 0 : 0.2, ease: EASE }}
+                >
+                  {anchored}
+                </motion.div>
+              </div>
+            ) : anchored;
+            if (!g.free) return content;
             const o = g.pos?.[it.id] ?? { x: 0, y: 0 };
             return (
               <div key={it.id} style={{ position: "absolute", left: o.x, top: o.y }}>
-                {anchored}
+                {content}
               </div>
             );
           }))(g.free ? freeRadii(g, widths) : null)}

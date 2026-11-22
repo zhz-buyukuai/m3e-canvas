@@ -11,6 +11,9 @@ import {
   carouselCountOf,
   carouselLayoutOf,
   dateLayoutOf,
+  sizeOf,
+  timeHorizontalOf,
+  timeInlineOf,
   timeLayoutOf,
   LINK_TARGET,
   MENU_TARGET,
@@ -253,11 +256,31 @@ const DATE_TEXT: Record<Lang, Record<DateLayout, string>> = {
   ko: { modal: "모달 대화상자", docked: "입력란에 붙는 도킹", input: "입력란만" },
 };
 const TIME_TEXT: Record<Lang, Record<TimeLayout, string>> = {
-  ja: { dial: "時計盤", input: "入力欄" },
-  en: { dial: "dial", input: "text input" },
-  zh: { dial: "表盘", input: "输入框" },
-  ko: { dial: "시계판", input: "입력란" },
+  ja: { scroll: "スクロール式", input: "入力式", dial: "時計盤式" },
+  en: { scroll: "scroll", input: "input", dial: "dial" },
+  zh: { scroll: "滚动式", input: "输入式", dial: "表盘式" },
+  ko: { scroll: "스크롤형", input: "입력형", dial: "시계판형" },
 };
+
+/** a time picker as M3 Expressive names it: which of the three, where it sits, which clock, how it is laid out */
+function timePickerText(it: Item, lang: Lang): string {
+  const l = timeLayoutOf(it);
+  const inline = timeInlineOf(it);
+  const h24 = !!it.clock24;
+  const side = timeHorizontalOf(it);
+  /* its own measurements: a dialog's size, or an inline picker's height and the width its fields fill */
+  const { w, h } = sizeOf(it, {});
+  const size: Record<Lang, string> = {
+    ja: inline ? `高さ ${h}dp、幅 ${w}dp いっぱいにフィールドを広げる` : `${w}×${h}dp`,
+    en: inline ? `${h}dp tall with the fields filling its ${w}dp width` : `${w}x${h}dp`,
+    zh: inline ? `高 ${h}dp，字段铺满 ${w}dp 宽` : `${w}×${h}dp`,
+    ko: inline ? `높이 ${h}dp, 필드가 너비 ${w}dp를 채움` : `${w}×${h}dp`,
+  };
+  if (lang === "ja") return `${inline ? "ページ内に置いた" : "ダイアログの"}${TIME_TEXT.ja[l]}時刻ピッカー（${h24 ? "24 時間表示" : "12 時間表示と AM/PM"}${side ? "、時計盤を数字の横に置く横向きの配置" : ""}、${size.ja}、現在時刻を選択中${inline ? "" : "、キャンセル／OK"}）`;
+  if (lang === "zh") return `${inline ? "嵌入页面的" : "对话框形式的"}${TIME_TEXT.zh[l]}时间选择器（${h24 ? "24 小时制" : "12 小时制，含 AM/PM"}${side ? "，表盘位于数字右侧的横向布局" : ""}，${size.zh}，已选中当前时间${inline ? "" : "，含取消／确定"}）`;
+  if (lang === "ko") return `${inline ? "페이지에 배치한 " : "대화상자 "}${TIME_TEXT.ko[l]} 시간 선택기(${h24 ? "24시간제" : "12시간제와 AM/PM"}${side ? ", 시계판을 숫자 옆에 둔 가로 배치" : ""}, ${size.ko}, 현재 시각 선택됨${inline ? "" : ", 취소 / 확인"})`;
+  return `${inline ? "an inline" : "a modal"} ${TIME_TEXT.en[l]} time picker on a ${h24 ? "24-hour clock" : "12-hour clock with AM/PM"}${side ? ", laid out horizontally with the dial beside the fields" : ""}, ${size.en}, set to the current time${inline ? "" : ", with Cancel / OK"}`;
+}
 
 /** a chip drawn at anything but the 32dp M3 asks for says so */
 function chipHeightText(it: Item, lang: Lang): string {
@@ -290,6 +313,18 @@ function fabScrollText(it: Item, lang: Lang): string {
   return "; when the body scrolls down, it collapses toward the right into an icon-only standard FAB (right edge fixed) and stays collapsed after scrolling stops; scrolling up expands it back to the extended FAB";
 }
 
+/** the optional scroll hiding for a top app bar or a navigation bar: what an implementation has
+ *  to match, not how the preview detects it. A top bar leaves upward, a navigation bar downward
+ *  and takes a FAB floating above it along. */
+function barScrollText(it: Item, lang: Lang): string {
+  if (!it.hideOnScroll) return "";
+  const top = it.kind === "topAppBar";
+  if (lang === "ja") return `。本文を下へスクロールすると画面の${top ? "上" : "下"}へ隠れ、止めても隠れたまま。少しでも上へスクロールすると戻る。${top ? "" : "その上に浮かぶ FAB も一緒に下へ動く。"}本文の先頭にいるときと、${top ? "ボタン" : "移動先"}にキーボードのフォーカスがある間は表示したままにする。動きは 200ms、動きを減らす設定ではアニメーションなし`;
+  if (lang === "zh") return `。正文向下滚动时滑出屏幕${top ? "顶部" : "底部"}隐藏，停止滚动后保持隐藏；任何向上滚动都会让它回来。${top ? "" : "浮在它上方的 FAB 随它一起下移。"}位于正文顶部或${top ? "其中的按钮" : "某个目的地"}获得键盘焦点时保持显示。滑动用时 200ms，启用减少动态效果时不播放动画`;
+  if (lang === "ko") return `. 본문을 아래로 스크롤하면 화면 ${top ? "위" : "아래"}로 숨고 멈춰도 숨긴 상태를 유지하며, 조금이라도 위로 스크롤하면 다시 나타난다. ${top ? "" : "그 위에 떠 있는 FAB도 함께 아래로 움직인다. "}본문 맨 위에 있을 때와 ${top ? "버튼" : "목적지"}에 키보드 포커스가 있는 동안에는 표시한다. 전환은 200ms이며, 동작 줄이기 설정에서는 애니메이션 없이 전환한다`;
+  return `; scrolling the body down slides it ${top ? "up off" : "below"} the screen and it stays hidden at rest; any upward scroll brings it back. ${top ? "" : "A FAB floating above it moves down with it. "}Keep it shown at the top of the body and while one of its ${top ? "buttons" : "destinations"} has keyboard focus. Slide it over 200 ms, or without animation when reduced motion is preferred`;
+}
+
 /** what a split button's arrow opens, and which way it goes */
 function splitMenuText(it: Item, lang: Lang): string {
   if (!splitOpens(it)) return "";
@@ -314,7 +349,7 @@ function itemJa(it: Item): string {
     case "datePicker":
       return `${DATE_TEXT.ja[dateLayoutOf(it)]}の日付ピッカー（今日の日付を選択中${dateLayoutOf(it) === "input" ? "" : "、月のグリッドとキャンセル／OK"}）`;
     case "timePicker":
-      return `${TIME_TEXT.ja[timeLayoutOf(it)]}の時刻ピッカー（現在時刻を選択中、AM/PM 切り替えとキャンセル／OK）`;
+      return timePickerText(it, "ja");
     case "iconButton":
       return `${it.icon ?? "空"} アイコンの${v}アイコンボタン${iconButtonSize(it, "ja")}`;
     case "fab":
@@ -324,10 +359,10 @@ function itemJa(it: Item): string {
     case "chip":
       return `${q(it.label)}のチップ${it.checked ? "（選択状態）" : ""}${it.icon && !it.checked ? `（${it.icon} アイコン付き）` : ""}${chipHeightText(it, "ja")}`;
     case "topAppBar":
-      return `タイトル${q(it.label)}のトップアプリバー${topBarSizeText(it, "ja")}${it.icon ? `。左に ${it.icon}` : ""}${it.icon2 ? `、右に ${it.icon2}` : ""}${it.icon || it.icon2 ? " のアイコンボタン" : ""}`;
+      return `タイトル${q(it.label)}のトップアプリバー${topBarSizeText(it, "ja")}${it.icon ? `。左に ${it.icon}` : ""}${it.icon2 ? `、右に ${it.icon2}` : ""}${it.icon || it.icon2 ? " のアイコンボタン" : ""}${barScrollText(it, "ja")}`;
     case "bottomNav": {
       const tabs = (it.tabs ?? []).map((t) => `${q(t.label || "ラベルなし")}(${t.icon || "アイコンなし"})`);
-      return `${tabs.length}項目のナビゲーションバー（${tabs.join("、")}。${selectedText(it, "ja")}）`;
+      return `${tabs.length}項目のナビゲーションバー（${tabs.join("、")}。${selectedText(it, "ja")}）${barScrollText(it, "ja")}`;
     }
     case "navRail": {
       const tabs = (it.tabs ?? []).map((t) => `${q(t.label || "ラベルなし")}(${t.icon || "アイコンなし"})`);
@@ -411,7 +446,7 @@ function itemEn(it: Item): string {
     case "datePicker":
       return `a date picker as a ${DATE_TEXT.en[dateLayoutOf(it)]} (today's date selected${dateLayoutOf(it) === "input" ? "" : ", with the month grid and Cancel / OK"})`;
     case "timePicker":
-      return `a time picker on a ${TIME_TEXT.en[timeLayoutOf(it)]} set to the current time, with the AM/PM toggle and Cancel / OK`;
+      return timePickerText(it, "en");
     case "iconButton":
       return `a ${v} icon button with the ${it.icon ?? "empty"} icon${iconButtonSize(it, "en")}`;
     case "fab":
@@ -421,10 +456,10 @@ function itemEn(it: Item): string {
     case "chip":
       return `a chip ${q(it.label)}${it.checked ? " (selected)" : ""}${it.icon && !it.checked ? ` with a ${it.icon} icon` : ""}${chipHeightText(it, "en")}`;
     case "topAppBar":
-      return `a top app bar titled ${q(it.label)}${topBarSizeText(it, "en")}${it.icon ? ` with a ${it.icon} icon button on the left` : ""}${it.icon2 ? `${it.icon ? " and" : " with"} ${it.icon2} on the right` : ""}`;
+      return `a top app bar titled ${q(it.label)}${topBarSizeText(it, "en")}${it.icon ? ` with a ${it.icon} icon button on the left` : ""}${it.icon2 ? `${it.icon ? " and" : " with"} ${it.icon2} on the right` : ""}${barScrollText(it, "en")}`;
     case "bottomNav": {
       const tabs = (it.tabs ?? []).map((t) => `${q(t.label || "unlabeled")} (${t.icon || "no icon"})`);
-      return `a navigation bar with ${tabs.length} destinations: ${tabs.join(", ")}; ${selectedText(it, "en")}`;
+      return `a navigation bar with ${tabs.length} destinations: ${tabs.join(", ")}; ${selectedText(it, "en")}${barScrollText(it, "en")}`;
     }
     case "navRail": {
       const tabs = (it.tabs ?? []).map((t) => `${q(t.label || "unlabeled")} (${t.icon || "no icon"})`);
@@ -508,7 +543,7 @@ function itemZh(it: Item): string {
     case "datePicker":
       return `${DATE_TEXT.zh[dateLayoutOf(it)]}形式的日期选择器（已选中今天的日期${dateLayoutOf(it) === "input" ? "" : "，含月份网格与取消／确定"}）`;
     case "timePicker":
-      return `${TIME_TEXT.zh[timeLayoutOf(it)]}形式的时间选择器（已选中当前时间，含 AM/PM 切换与取消／确定）`;
+      return timePickerText(it, "zh");
     case "iconButton":
       return `${it.icon ?? "空"} 图标的${v}图标按钮${iconButtonSize(it, "zh")}`;
     case "fab":
@@ -518,10 +553,10 @@ function itemZh(it: Item): string {
     case "chip":
       return `${q(it.label)}标签片${it.checked ? "（选中状态）" : ""}${it.icon && !it.checked ? `（带 ${it.icon} 图标）` : ""}${chipHeightText(it, "zh")}`;
     case "topAppBar":
-      return `标题为${q(it.label)}的顶部应用栏${topBarSizeText(it, "zh")}${it.icon ? `，左侧是 ${it.icon}` : ""}${it.icon2 ? `，右侧是 ${it.icon2}` : ""}${it.icon || it.icon2 ? " 图标按钮" : ""}`;
+      return `标题为${q(it.label)}的顶部应用栏${topBarSizeText(it, "zh")}${it.icon ? `，左侧是 ${it.icon}` : ""}${it.icon2 ? `，右侧是 ${it.icon2}` : ""}${it.icon || it.icon2 ? " 图标按钮" : ""}${barScrollText(it, "zh")}`;
     case "bottomNav": {
       const tabs = (it.tabs ?? []).map((t) => `${q(t.label || "无标签")}(${t.icon || "无图标"})`);
-      return `${tabs.length}个项目的导航栏（${tabs.join("、")}，${selectedText(it, "zh")}）`;
+      return `${tabs.length}个项目的导航栏（${tabs.join("、")}，${selectedText(it, "zh")}）${barScrollText(it, "zh")}`;
     }
     case "navRail": {
       const tabs = (it.tabs ?? []).map((t) => `${q(t.label || "无标签")}(${t.icon || "无图标"})`);
@@ -601,15 +636,15 @@ function itemKo(it: Item): string {
     case "button": return `${hasText(it.label) ? q(it.label) : "레이블 없는"} ${v} 버튼${it.icon ? `(${it.icon} 아이콘 포함)` : ""}${buttonSize(it, "ko")}`;
     case "carousel": return `${CAROUSEL_TEXT.ko[carouselLayoutOf(it)]} 레이아웃 캐러셀(카드 ${carouselCountOf(it)}장, 높이 ${it.size2 ?? 180}dp, 카드마다 모서리 16dp, 가로 스크롤${carouselCardsText(it, "ko")})`;
     case "datePicker": return `${DATE_TEXT.ko[dateLayoutOf(it)]} 형태의 날짜 선택기(오늘 날짜 선택됨${dateLayoutOf(it) === "input" ? "" : ", 월 그리드와 취소 / 확인"})`;
-    case "timePicker": return `${TIME_TEXT.ko[timeLayoutOf(it)]} 형태의 시간 선택기(현재 시각 선택됨, AM/PM 전환과 취소 / 확인)`;
+    case "timePicker": return timePickerText(it, "ko");
     case "iconButton": return `${it.icon ?? "빈"} 아이콘의 ${v} 아이콘 버튼${iconButtonSize(it, "ko")}`;
     case "fab": return `${it.icon ?? "빈"} 아이콘의 ${v} FAB${it.size && it.size >= 96 ? "(대형)" : it.size && it.size <= 40 ? "(소형)" : ""}${fabMenuText(it, "ko")}`;
     case "extendedFab": return `${q(it.label)}${it.icon ? ` 및 ${it.icon} 아이콘` : ""} 확장 FAB(${v}${it.size2 && it.size2 !== 56 ? `, 높이 ${it.size2}dp` : ""})${fabMenuText(it, "ko")}${fabScrollText(it, "ko")}`;
     case "chip": return `${q(it.label)} 칩${it.checked ? "(선택됨)" : ""}${it.icon && !it.checked ? `(${it.icon} 아이콘 포함)` : ""}${chipHeightText(it, "ko")}`;
-    case "topAppBar": return `제목이 ${q(it.label)}인 상단 앱 바${topBarSizeText(it, "ko")}${it.icon ? `, 왼쪽 ${it.icon}` : ""}${it.icon2 ? `, 오른쪽 ${it.icon2}` : ""}${it.icon || it.icon2 ? " 아이콘 버튼" : ""}`;
+    case "topAppBar": return `제목이 ${q(it.label)}인 상단 앱 바${topBarSizeText(it, "ko")}${it.icon ? `, 왼쪽 ${it.icon}` : ""}${it.icon2 ? `, 오른쪽 ${it.icon2}` : ""}${it.icon || it.icon2 ? " 아이콘 버튼" : ""}${barScrollText(it, "ko")}`;
     case "bottomNav": {
       const tabs = (it.tabs ?? []).map((t) => `${q(t.label || "레이블 없음")}(${t.icon || "아이콘 없음"})`);
-      return `${tabs.length}개 항목의 내비게이션 바(${tabs.join(", ")}, ${selectedText(it, "ko")})`;
+      return `${tabs.length}개 항목의 내비게이션 바(${tabs.join(", ")}, ${selectedText(it, "ko")})${barScrollText(it, "ko")}`;
     }
     case "navRail": {
       const tabs = (it.tabs ?? []).map((t) => `${q(t.label || "레이블 없음")}(${t.icon || "아이콘 없음"})`);
@@ -686,12 +721,12 @@ function boxCorners(it: Item, lang: Lang): string {
 
 const itemText = (it: Item, lang: Lang) => (lang === "ja" ? itemJa(it) : lang === "zh" ? itemZh(it) : lang === "ko" ? itemKo(it) : itemEn(it));
 
-/** A collapse-on-scroll FAB only has that behavior on a screen whose body actually scrolls. */
+/** Scroll behaviors only apply on a screen whose body actually scrolls. */
 function promptGroupsForScroll(groups: Group[], scrollable: boolean): Group[] {
   if (scrollable) return groups;
   return groups.map((g) => ({
     ...g,
-    items: g.items.map((it) => it.collapseOnScroll ? { ...it, collapseOnScroll: undefined } : it),
+    items: g.items.map((it) => it.collapseOnScroll || it.hideOnScroll ? { ...it, collapseOnScroll: undefined, hideOnScroll: undefined } : it),
   }));
 }
 
@@ -1176,7 +1211,7 @@ const STYLE_NOTES: Record<Lang, Partial<Record<Kind, string>>> = {
     datePicker:
       "日付ピッカー: M3 の DatePicker。モーダルは見出し・月の切り替え・曜日の行・日付のグリッド・キャンセル／OK を持つ角丸 28dp のダイアログ、ドッキングは入力欄の下に付く同じカレンダー、入力欄のみは末尾にカレンダーのアイコンが付いたアウトラインのテキストフィールド。選択日は primary の円で示す。",
     timePicker:
-      "時刻ピッカー: M3 の TimePicker。時と分を 2 つの大きな数字プレート（選択中は primaryContainer、他は surfaceContainerHighest）と AM/PM の縦の切り替えで示す。時計盤は surfaceContainerHighest の円に primary の針、入力欄は数字を直接打ち込む。下部にキャンセル／OK と、時計盤／キーボードを切り替えるアイコン。",
+      "時刻ピッカー: M3 Expressive の TimePicker。時と分は surfaceContainerLowest の 100×120dp のフィールド（24 時間表示の縦の時計盤では幅 132dp、角丸 16dp、数字 57sp）で、設定中の方は 2dp の primary の枠と primary の数字。AM/PM は 2 つのボタンで、選択中は primaryContainer の角丸四角、もう一方は surfaceContainerLowest の円。ダイアログでは 56dp でフィールドの横に縦並び、横向きの配置ではフィールドの下に 100×40dp で横並び、ページ内ではモード切り替えと一緒に 40dp で縦並び。24 時間表示には AM/PM がない。スクロール式は各フィールドがホイールで、前後の値を outline 色で上下の端に切れた形で見せる。時計盤は surfaceContainerLowest の 256dp の円に primary の 2dp の針、8dp の中心、48dp の選択ハンドル。24 時間表示の時計盤は内側の輪に 12〜23 を置く。ダイアログは surfaceContainerHigh、角丸 28dp、余白 12dp（横向きは 24dp）で、下にモード切り替えのアイコンとキャンセル／OK のテキストボタン。大きさは縦の時計盤が 304×472dp、時計盤を数字の横に置く横向きが 572×376dp、スクロール式と入力式が 304×200dp（24 時間表示は幅 240dp）。ページ内に置く場合は容器がなく、高さ 140dp で幅いっぱいにフィールドを広げる。",
     fab: "FAB: 通常は 56dp・角丸 16dp、大サイズは 96dp・角丸 28dp、小サイズは 40dp・角丸 12dp。トーナルは primaryContainer、塗りつぶしは primary。画面端から 16dp 離して浮かせ、影は Level 3。",
     extendedFab: "拡張 FAB: 高さ 56dp（M3 の 3 サイズは 56 / 80 / 96dp、角丸と文字もそれに合わせる）、角丸 16dp、左にアイコン・右にラベル。",
     chip:
@@ -1230,7 +1265,7 @@ const STYLE_NOTES: Record<Lang, Partial<Record<Kind, string>>> = {
     datePicker:
       "Date picker: the M3 DatePicker. The modal is a 28dp-cornered dialog with a headline, the month switcher, the weekday row, the day grid and Cancel / OK; docked is the same calendar hanging under a text field; input only is an outlined text field with a calendar icon at its end. The selected day is a primary circle.",
     timePicker:
-      "Time picker: the M3 TimePicker. The hour and minute are two large number plates (the selected one primaryContainer, the other surfaceContainerHighest) beside a vertical AM/PM toggle. The dial is a surfaceContainerHighest circle with a primary hand; the input layout types the numbers directly. Cancel / OK sit at the bottom with an icon that switches between dial and keyboard.",
+      "Time picker: the M3 Expressive TimePicker. The hour and minute are two 100x120dp fields (132dp wide on a 24-hour upright dial) on surfaceContainerLowest with 16dp corners and 57sp digits; the one being set has a 2dp primary outline and primary digits. AM/PM are two buttons, the chosen one a rounded square in primaryContainer, the other a circle on surfaceContainerLowest: 56dp and stacked beside the fields in a dialog, two 100x40dp buttons in a row under the fields in the horizontal layout, and 40dp in a column with the mode switch inline. A 24-hour clock has no AM/PM. The scroll picker turns each field into a wheel that shows the previous and next values in outline, cut off by its edges. The dial is a 256dp surfaceContainerLowest circle with a 2dp primary hand, an 8dp centre and a 48dp selector; a 24-hour dial puts 12 to 23 on an inner ring. A dialog is on surfaceContainerHigh with 28dp corners and 12dp padding (24dp for the horizontal dial), and ends with the mode switch icon and Cancel / OK text buttons. Sizes: 304x472dp for the upright dial, 572x376dp for the horizontal one with the dial beside the fields, and 304x200dp for scroll and input (240dp wide on a 24-hour clock). An inline picker has no container: it is 140dp tall and its fields fill its width.",
     fab: "FAB: 56dp with 16dp corners; large is 96dp with 28dp corners; small is 40dp with 12dp corners. Tonal uses primaryContainer, filled uses primary. Float it 16dp from the screen edge with a level 3 shadow.",
     extendedFab: "Extended FAB: 56dp tall (M3's three sizes are 56 / 80 / 96dp, with the corners and the label growing to match), 16dp corners, icon on the left and label on the right.",
     chip:
@@ -1283,7 +1318,7 @@ const STYLE_NOTES: Record<Lang, Partial<Record<Kind, string>>> = {
     datePicker:
       "日期选择器：M3 的 DatePicker。模态形式是圆角 28dp 的对话框，含标题、月份切换、星期行、日期网格与取消／确定；停靠形式是挂在输入框下方的同一日历；仅输入框形式是末尾带日历图标的描边文本框。选中日期用 primary 圆形标出。",
     timePicker:
-      "时间选择器：M3 的 TimePicker。小时与分钟是两块大数字面板（选中的用 primaryContainer，另一块用 surfaceContainerHighest），旁边是竖向的 AM/PM 切换。表盘是 surfaceContainerHighest 的圆形加 primary 指针；输入框形式直接输入数字。底部有取消／确定以及切换表盘／键盘的图标。",
+      "时间选择器：M3 Expressive 的 TimePicker。小时与分钟是 surfaceContainerLowest 上的两个 100×120dp 字段（24 小时制竖向表盘中宽 132dp，圆角 16dp，数字 57sp），正在设置的一个带 2dp 的 primary 描边，数字为 primary。AM/PM 是两个按钮，选中的为 primaryContainer 的圆角方形，另一个为 surfaceContainerLowest 的圆形：对话框中为 56dp，竖排在字段旁边；横向布局中为字段下方横排的两个 100×40dp 按钮；嵌入页面时为 40dp，与模式切换竖排在一起。24 小时制没有 AM/PM。滚动式把每个字段做成滚轮，前后的值用 outline 色显示并被上下边缘截断。表盘是 256dp 的 surfaceContainerLowest 圆，带 2dp 的 primary 指针、8dp 的中心点和 48dp 的选择手柄；24 小时制表盘把 12 到 23 放在内圈。对话框使用 surfaceContainerHigh，圆角 28dp，内边距 12dp（横向表盘为 24dp），底部是模式切换图标和取消／确定文本按钮。尺寸：竖向表盘 304×472dp，表盘位于数字旁边的横向布局 572×376dp，滚动式和输入式 304×200dp（24 小时制宽 240dp）。嵌入页面时没有容器：高 140dp，字段铺满宽度。",
     fab: "FAB：常规 56dp、圆角 16dp；大尺寸 96dp、圆角 28dp；小尺寸 40dp、圆角 12dp。色调用 primaryContainer，填充用 primary。距屏幕边缘 16dp 悬浮，阴影为 Level 3。",
     extendedFab: "扩展 FAB：高 56dp（M3 的三种尺寸为 56 / 80 / 96dp，圆角与文字随之变化），圆角 16dp，左侧图标、右侧标签。",
     chip:
@@ -1335,7 +1370,7 @@ const STYLE_NOTES: Record<Lang, Partial<Record<Kind, string>>> = {
     datePicker:
       "날짜 선택기: M3 DatePicker. 모달은 제목, 월 전환, 요일 행, 날짜 그리드, 취소 / 확인을 갖춘 모서리 28dp 대화상자이고, 도킹은 입력란 아래에 붙는 같은 달력, 입력란만은 끝에 달력 아이콘이 있는 윤곽선 텍스트 필드다. 선택한 날은 primary 원으로 표시한다.",
     timePicker:
-      "시간 선택기: M3 TimePicker. 시와 분은 큰 숫자 판 두 개(선택된 쪽은 primaryContainer, 다른 쪽은 surfaceContainerHighest)와 세로 AM/PM 전환으로 보여 준다. 시계판은 surfaceContainerHighest 원에 primary 바늘, 입력란은 숫자를 직접 입력한다. 아래에 취소 / 확인과 시계판 / 키보드를 전환하는 아이콘을 둔다.",
+      "시간 선택기: M3 Expressive TimePicker. 시와 분은 surfaceContainerLowest 위의 100×120dp 필드 두 개(24시간제 세로 시계판에서는 너비 132dp, 모서리 16dp, 숫자 57sp)이며, 설정 중인 쪽은 2dp primary 테두리와 primary 숫자를 쓴다. AM/PM은 버튼 두 개로, 선택된 쪽은 primaryContainer의 둥근 사각형, 다른 쪽은 surfaceContainerLowest의 원이다. 대화상자에서는 56dp로 필드 옆에 세로로 쌓고, 가로 배치에서는 필드 아래에 100×40dp 버튼 두 개를 가로로 두며, 페이지에 배치하면 모드 전환과 함께 40dp로 세로로 둔다. 24시간제에는 AM/PM이 없다. 스크롤형은 각 필드를 휠로 만들어 앞뒤 값을 outline 색으로 위아래 가장자리에 잘린 채 보여 준다. 시계판은 256dp surfaceContainerLowest 원에 2dp primary 바늘, 8dp 중심점, 48dp 선택 핸들을 둔다. 24시간제 시계판은 12~23을 안쪽 원에 둔다. 대화상자는 surfaceContainerHigh, 모서리 28dp, 여백 12dp(가로 시계판은 24dp)이며 아래에 모드 전환 아이콘과 취소 / 확인 텍스트 버튼이 있다. 크기는 세로 시계판 304×472dp, 시계판을 숫자 옆에 둔 가로 배치 572×376dp, 스크롤형과 입력형 304×200dp(24시간제는 너비 240dp)이다. 페이지에 배치하면 컨테이너 없이 높이 140dp에 필드가 너비를 채운다.",
     fab: "FAB: 기본 56dp/모서리 16dp, 대형 96dp/28dp, 소형 40dp/12dp. 토널은 primaryContainer, 채움은 primary를 사용하고 화면 가장자리에서 16dp 띄워 Level 3 그림자를 적용한다.",
     extendedFab: "확장 FAB: 높이 56dp(M3의 세 크기는 56 / 80 / 96dp이며 모서리와 글자도 이에 맞춘다), 모서리 16dp, 왼쪽에 아이콘, 오른쪽에 레이블을 둔다.",
     chip:
@@ -1571,7 +1606,7 @@ const PH = {
     empty: "画面にはまだ部品が置かれていません。",
     screens: (names: string[]) => `画面は ${names.length} つあり、${names.join("、")}です。`,
     placement: (place: Place) => (place === "center" ? "本文の部品は画面の縦中央にまとめて配置します。" : place === "bottom" ? "本文の部品は画面の下側（ナビゲーションバーの上）に寄せて配置します。" : "本文の部品は画面の高さいっぱいに均等な間隔で配置します（1 行だけなら縦中央）。"),
-    scrolls: (length: number, view: number) => `画面の長さは ${length}dp で、端末に映る ${view}dp より長いため、本文は縦にスクロールします。バーと、コンテンツの上に浮かぶ部品（FAB、スナックバーなど）はスクロールしても固定のままです。`,
+    scrolls: (length: number, view: number) => `画面の長さは ${length}dp で、端末に映る ${view}dp より長いため、本文は縦にスクロールします。バーと、コンテンツの上に浮かぶ部品（FAB、スナックバーなど）は表示領域に固定し、以下に指定するスクロール動作を適用します。`,
     screenHead: (name: string, bg: string | undefined, has: boolean, size?: string) => `${name}画面${size || bg ? `（${[size, bg ? `背景は ${bg}` : ""].filter(Boolean).join("、")}）` : ""}${has ? "は上から順に次の通りです。重なっている部品はその旨を書いています。" : "はまだ空です。"}`,
     loose: "画面の外に置かれている部品（共通パーツや参考）:",
     freeform: "画面を上から順に説明します。",
@@ -1615,7 +1650,7 @@ const PH = {
     empty: "Nothing has been placed on the screen yet.",
     screens: (names: string[]) => `There are ${names.length} screens: ${names.join(", ")}.`,
     placement: (place: Place) => (place === "center" ? "The body parts sit together in the vertical center of the screen." : place === "bottom" ? "The body parts sit toward the bottom of the screen, above the navigation bar." : "The body parts are spread over the screen height with equal gaps (a single row sits in the vertical center)."),
-    scrolls: (length: number, view: number) => `The screen runs ${length}dp, longer than the ${view}dp the device shows, so its body scrolls vertically; the bars and anything floating over the content (a FAB, a snackbar) stay fixed while it scrolls.`,
+    scrolls: (length: number, view: number) => `The screen runs ${length}dp, longer than the ${view}dp the device shows, so its body scrolls vertically; the bars and anything floating over the content (a FAB, a snackbar) stay anchored to the viewport, with any scroll behavior specified below.`,
     screenHead: (name: string, bg: string | undefined, has: boolean, size?: string) => `The ${name} screen${size || bg ? ` (${[size, bg ? `background ${bg}` : ""].filter(Boolean).join(", ")})` : ""}${has ? ", from top to bottom (overlapping parts are called out as such):" : " is still empty."}`,
     loose: "Parts placed outside the screens (shared parts or references):",
     freeform: "The screen, from top to bottom:",
@@ -1659,7 +1694,7 @@ const PH = {
     empty: "屏幕上还没有放置任何组件。",
     screens: (names: string[]) => `共有 ${names.length} 个屏幕：${names.join("、")}。`,
     placement: (place: Place) => (place === "center" ? "内容作为整体，在屏幕内容区域内纵向居中排列。" : place === "bottom" ? "内容区域中的组件靠屏幕底部（导航栏上方）放置。" : "各行内容在屏幕内容区域内纵向均匀分布（只有一行时纵向居中）。"),
-    scrolls: (length: number, view: number) => `屏幕总长 ${length}dp，超过设备可显示的 ${view}dp，因此内容区域可纵向滚动；栏以及浮在内容之上的组件（FAB、Snackbar 等）在滚动时保持固定。`,
+    scrolls: (length: number, view: number) => `屏幕总长 ${length}dp，超过设备可显示的 ${view}dp，因此内容区域可纵向滚动；栏以及浮在内容之上的组件（FAB、Snackbar 等）锚定在可视区域，并应用下文指定的滚动行为。`,
     screenHead: (name: string, bg: string | undefined, has: boolean, size?: string) => `${name}屏幕${size || bg ? `（${[size, bg ? `背景为 ${bg}` : ""].filter(Boolean).join("，")}）` : ""}${has ? "从上到下依次如下（重叠的组件会特别说明）：" : "目前为空。"}`,
     loose: "放在屏幕之外的组件（公共部件或参考）：",
     freeform: "从上到下说明屏幕内容：",
@@ -1688,7 +1723,7 @@ const PH = {
     empty: "화면에 아직 부품이 없습니다.",
     screens: (names: string[]) => `화면은 ${names.length}개이며 ${names.join(", ")}입니다.`,
     placement: (place: Place) => (place === "center" ? "본문 부품은 화면 세로 가운데에 모아 배치한다." : place === "bottom" ? "본문 부품은 화면 아래쪽(내비게이션 바 위)에 붙여 배치한다." : "본문 부품은 화면 높이에 걸쳐 같은 간격으로 배치한다(한 줄뿐이면 세로 가운데)."),
-    scrolls: (length: number, view: number) => `화면 길이는 ${length}dp로 기기에 보이는 ${view}dp보다 길어서 본문이 세로로 스크롤된다. 바와 콘텐츠 위에 떠 있는 부품(FAB, 스낵바 등)은 스크롤해도 고정된다.`,
+    scrolls: (length: number, view: number) => `화면 길이는 ${length}dp로 기기에 보이는 ${view}dp보다 길어서 본문이 세로로 스크롤된다. 바와 콘텐츠 위에 떠 있는 부품(FAB, 스낵바 등)은 표시 영역에 고정되며 아래에 지정한 스크롤 동작을 적용한다.`,
     screenHead: (name: string, bg: string | undefined, has: boolean, size?: string) => `${name} 화면${size || bg ? `(${[size, bg ? `배경 ${bg}` : ""].filter(Boolean).join(", ")})` : ""}. ${has ? "위에서부터 다음과 같습니다. 겹친 부품은 별도로 표시합니다." : "아직 비어 있습니다."}`,
     loose: "화면 밖에 놓인 부품(공통 부품 또는 참고):",
     freeform: "화면을 위에서부터 설명합니다.",

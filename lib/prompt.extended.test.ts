@@ -223,6 +223,73 @@ describe("extended FAB scroll-collapse prompt", () => {
   });
 });
 
+describe("navigation bar scroll hiding in prompts", () => {
+  const behavior: Record<Lang, string> = {
+    ja: "本文を下へスクロールすると画面の下へ隠れ",
+    en: "scrolling the body down slides it below the screen",
+    zh: "正文向下滚动时滑出屏幕底部隐藏",
+    ko: "본문을 아래로 스크롤하면 화면 아래로 숨고",
+  };
+  const requirements: Record<Lang, string[]> = {
+    ja: ["止めても隠れたまま", "少しでも上へスクロールすると戻る", "本文の先頭にいるときと、移動先にキーボードのフォーカスがある間は表示したままにする", "動きは 200ms、動きを減らす設定ではアニメーションなし"],
+    en: ["stays hidden at rest", "any upward scroll brings it back", "Keep it shown at the top of the body and while one of its destinations has keyboard focus", "Slide it over 200 ms, or without animation when reduced motion is preferred"],
+    zh: ["停止滚动后保持隐藏", "任何向上滚动都会让它回来", "位于正文顶部或某个目的地获得键盘焦点时保持显示", "滑动用时 200ms，启用减少动态效果时不播放动画"],
+    ko: ["멈춰도 숨긴 상태를 유지하며", "조금이라도 위로 스크롤하면 다시 나타난다", "본문 맨 위에 있을 때와 목적지에 키보드 포커스가 있는 동안에는 표시한다", "전환은 200ms이며, 동작 줄이기 설정에서는 애니메이션 없이 전환한다"],
+  };
+  const prompt = (lang: Lang, hideOnScroll?: boolean, length = PHONE_H * 2, kind: Item["kind"] = "bottomNav", platform: Doc["platform"] = "android") => {
+    const nav = { ...makeItem(kind), id: "nav", hideOnScroll };
+    return buildPrompt(baseDoc({ platform, frames: [{ ...phoneFrame, length }], groups: [{ id: "g", x: 0, y: length - 104, axis: "x", items: [nav] }] }), widths, undefined, lang);
+  };
+
+  it.each(["ja", "en", "zh", "ko"] as Lang[])("describes scroll hiding, when it stays shown, and its motion in %s on Android and web", (lang) => {
+    for (const platform of ["android", "web"] as const) {
+      const text = prompt(lang, true, PHONE_H * 2, "bottomNav", platform);
+      expect(text).toContain(behavior[lang]);
+      for (const requirement of requirements[lang]) expect(text).toContain(requirement);
+    }
+  });
+
+  it.each(["ja", "en", "zh", "ko"] as Lang[])("only describes hiding for enabled navigation bars on scrollable screens in %s", (lang) => {
+    for (const platform of ["android", "web"] as const) {
+      const texts = [
+        prompt(lang, undefined, PHONE_H * 2, "bottomNav", platform),
+        prompt(lang, false, PHONE_H * 2, "bottomNav", platform),
+        prompt(lang, true, PHONE_H, "bottomNav", platform),
+        prompt(lang, true, PHONE_H * 2, "navRail", platform),
+      ];
+      for (const text of texts) {
+        expect(text).not.toContain(behavior[lang]);
+        for (const requirement of requirements[lang]) expect(text).not.toContain(requirement);
+      }
+    }
+  });
+});
+
+describe("top app bar scroll hiding in prompts", () => {
+  const up: Record<Lang, string> = {
+    ja: "本文を下へスクロールすると画面の上へ隠れ",
+    en: "scrolling the body down slides it up off the screen",
+    zh: "正文向下滚动时滑出屏幕顶部隐藏",
+    ko: "본문을 아래로 스크롤하면 화면 위로 숨고",
+  };
+  const fab: Record<Lang, string> = { ja: "FAB も一緒に下へ動く", en: "A FAB floating above it moves down with it", zh: "FAB 随它一起下移", ko: "FAB도 함께 아래로" };
+  const prompt = (lang: Lang, hideOnScroll: boolean | undefined, length = PHONE_H * 2) => {
+    const bar = { ...makeItem("topAppBar"), id: "bar", label: "Inbox", hideOnScroll };
+    return buildPrompt(baseDoc({ frames: [{ ...phoneFrame, length }], groups: [{ id: "g", x: 0, y: 0, axis: "x", items: [bar] }] }), widths, undefined, lang);
+  };
+
+  it.each(["ja", "en", "zh", "ko"] as Lang[])("says the bar leaves upward in %s, without the FAB note", (lang) => {
+    const text = prompt(lang, true);
+    expect(text).toContain(up[lang]);
+    expect(text).not.toContain(fab[lang]);
+  });
+
+  it.each(["ja", "en", "zh", "ko"] as Lang[])("says nothing when it is off or the screen does not scroll in %s", (lang) => {
+    expect(prompt(lang, undefined)).not.toContain(up[lang]);
+    expect(prompt(lang, true, PHONE_H)).not.toContain(up[lang]);
+  });
+});
+
 describe("buildPrompt — platform switch", () => {
   it("Android platform mentions Android / Material", () => {
     const doc = baseDoc({ platform: "android" });

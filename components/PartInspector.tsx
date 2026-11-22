@@ -43,6 +43,8 @@ import {
   progressTypePatch,
   setIconSlot,
   sizeOf,
+  TIME_HORIZONTAL_W,
+  timeInlineOf,
   timeLayoutOf,
   topBarHeightOf,
 } from "@/lib/tokens";
@@ -515,6 +517,18 @@ export function PartInspector({
           <EntryList item={item} onChange={onChange} p={p} icons={kind !== "tabs" && kind !== "select"} selectable clearable={kind === "select"} />
         </Section>
       )}
+      {(kind === "bottomNav" || kind === "topAppBar") && (
+        <Section id="nav-scroll" icon="unfold_more" title={t("scrolling", lang)} p={p}>
+          <Toggle
+            on={!!item.hideOnScroll}
+            onChange={(hideOnScroll) => onChange({ hideOnScroll: hideOnScroll || undefined })}
+            p={p}
+            icon={kind === "topAppBar" ? "vertical_align_top" : "vertical_align_bottom"}
+            label={t("navScrollSwitch", lang)}
+            grow
+          />
+        </Section>
+      )}
       {kind === "toolbar" && (
         <Section id="part-entries" icon="view_column" title={t("tabs", lang)} p={p}>
           <IconStrip item={item} onChange={onChange} p={p} />
@@ -604,13 +618,24 @@ export function PartInspector({
       )}
       {kind === "timePicker" && (
         <Section id="part-layout" icon="schedule" title={t("layout", lang)} p={p}>
-          <Segmented<TimeLayout>
-            options={TIME_LAYOUTS.map((l) => ({ key: l.key, icon: l.icon, title: t(l.text, lang) }))}
-            value={timeLayoutOf(item)}
-            onChange={(layout) => onChange({ layout })}
-            p={p}
-            label={t("layout", lang)}
-          />
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <Segmented<TimeLayout>
+              options={TIME_LAYOUTS.map((l) => ({ key: l.key, icon: l.icon, title: t(l.text, lang) }))}
+              value={timeLayoutOf(item)}
+              onChange={(layout) => onChange({ layout })}
+              p={p}
+              label={t("layout", lang)}
+            />
+            <Toggle on={!!item.clock24} onChange={(clock24) => onChange({ clock24: clock24 || undefined })} p={p} icon="schedule" label={t("time24h", lang)} grow />
+            {/* M3 Expressive: the scroll and input pickers can sit in the page, the dial can lie on its side */}
+            {/* the horizontal dial is 572dp wide: it is offered off the screens and on a screen wide
+                enough to hold it, and still shown where it is on, so it can be turned off */}
+            {timeLayoutOf(item) === "dial" ? (
+              (!frame || frameW >= TIME_HORIZONTAL_W || item.horizontal) && <Toggle on={!!item.horizontal} onChange={(horizontal) => onChange({ horizontal: horizontal || undefined })} p={p} icon="splitscreen_right" label={t("timeHorizontal", lang)} grow />
+            ) : (
+              <Toggle on={!!item.inline} onChange={(inline) => onChange({ inline: inline || undefined })} p={p} icon="view_agenda" label={t("timeInline", lang)} grow />
+            )}
+          </div>
         </Section>
       )}
 
@@ -719,7 +744,7 @@ export function PartInspector({
           /* a carousel runs the width of the screen it is on: its height is the one measure its author sets */
           heightRow(CAROUSEL_HEIGHTS),
         )}
-      {(kind === "datePicker" || kind === "timePicker") && sizeSection(widthRows())}
+      {(kind === "datePicker" || (kind === "timePicker" && timeInlineOf(item))) && sizeSection(widthRows())}
       {kind === "slider" &&
         sizeSection(
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
