@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
+import { useRouter } from "next/navigation";
 import { AnimatePresence, motion, useReducedMotion, useSpring } from "motion/react";
 import { toPng } from "html-to-image";
 import { buildPrompt, effectivePrompt } from "@/lib/prompt";
@@ -43,7 +44,6 @@ import {
   migrateSheetBox,
   buttonHeightOf,
   explodeGroup,
-  freeRadii,
   radiiOfRuns,
   BEZEL,
   canJoin,
@@ -103,20 +103,21 @@ import {
   Transition,
   TRANSITIONS,
   uid,
-  uniformRadii,
   FULL_WIDTH,
   fitHeight,
   railExpansionSide,
   CONTENT_W,
   contentWidth,
 } from "@/lib/tokens";
-import { Icon, M3Node, M3Static, MeasuredContent } from "@/components/M3Node";
+import { Icon, M3Node, MeasuredContent } from "@/components/M3Node";
+import { FrameStatic } from "@/components/FrameStatic";
 import { CORNER_GAIN, CORNERS, HandleSide, SizeHandles } from "@/components/SizeHandles";
 import { LayersPanel } from "@/components/Layers";
 import { FrameSizePicker, Inspector } from "@/components/Inspector";
 import { FrameInspector } from "@/components/FramePanel";
 import { Preview } from "@/components/Preview";
 import { Logo } from "@/components/Logo";
+import { LogoSwap } from "@/components/LogoSwap";
 import { PartsPalette } from "@/components/PartsPalette";
 import { PromptPanel } from "@/components/PromptPanel";
 import { GitHubLink, Mode, Toolbar } from "@/components/Toolbar";
@@ -127,7 +128,8 @@ import { AiSettings, DEFAULT_AI, hasKey, isSecureUrl, loadAiSettings, proposeBeh
 import { barSlotOf, bodyRect, carryFrame, holdsEdgeBar, maxFrameLength, minFrameLength, pullInto, stretchFrame, tidyFrame } from "@/lib/tidy";
 import { constrainModalRails, modalRailOf, updateRail } from "@/lib/rail";
 import { joinRun, landMoved, liftSelection, sequenceOf, sequenceSize } from "@/lib/move";
-import { isProject, readProject, saveProject } from "@/lib/project";
+import { readProject, saveProject } from "@/lib/project";
+import { Backend, Project, createSaver, keepStored, lockName, smallStorage } from "@/lib/projects";
 import { hasShareHash, readShareHash } from "@/lib/share";
 import { LoadingIndicator } from "@/components/Loading";
 import { draftDesign } from "@/lib/ai";
@@ -167,15 +169,20 @@ const GAP_TWEEN = { duration: SETTLE_MS / 1000, ease: [0.2, 0, 0, 1] as const };
 const RAIL_W = 52;
 const MIN_Z = 0.25;
 const MAX_Z = 3;
+/** how long the camera takes to reach a zoom or a fit asked for with a button or a key */
+const CAMERA_MS = 240;
+/** How quickly the view closes on the zoom a wheel asks for, as a time constant. A pinch on a
+ *  trackpad arrives in many small steps and is followed closely; a wheel's notches are far
+ *  apart and are smoothed over. */
+const WHEEL_EASE_MS = 80;
+const PINCH_EASE_MS = 26;
+/** how long the right panel takes to slide open or shut */
+const PANEL_MS = 280;
 /** the room a screen keeps from the canvas edges when the camera glides to it: the floating
  *  toolbar's row at the top, a margin elsewhere */
 const GLIDE_TOP = 84;
 const GLIDE_PAD = 40;
 const HISTORY_MAX = 100;
-const DOC_KEY = "m3e:doc";
-/** the design a draft or a link replaced, until the author keeps or undoes it */
-const BEFORE_KEY = "m3e:doc:before";
-const DOC_LOCK = "m3e:doc:editor";
 const UI_KEY = "m3e:ui";
 
 type View = { x: number; y: number; z: number };
@@ -463,21 +470,81 @@ function ThinkingRing({ p, frame }: { p: Palette; frame: Frame }) {
   );
 }
 
-type LeftTab = "parts" | "layers" | "color" | "shape" | "type" | "motion" | "ai";
-/** the left rail: parts and layers, then the four theme axes of the whole design */
-const LEFT_TABS: { key: LeftTab; icon: string; title: "parts" | "layers" | "colors" | "shape" | "typography" | "motion" | "ai" }[] = [
+type LeftTab = "parts" | "layers" | "theme" | "ai";
+/** the left rail: what a screen is built from, how it is stacked, how the whole design looks, and the model */
+const LEFT_TABS: { key: LeftTab; icon: string; title: "parts" | "layers" | "theme" | "ai" }[] = [
   { key: "parts", icon: "add_box", title: "parts" },
   { key: "layers", icon: "layers", title: "layers" },
+  { key: "theme", icon: "palette", title: "theme" },
+  { key: "ai", icon: "auto_awesome", title: "ai" },
+];
+type ThemeTab = "color" | "shape" | "type" | "motion";
+/** the four axes of the theme, chosen between inside its one tab */
+const THEME_TABS: { key: ThemeTab; icon: string; title: "colors" | "shape" | "typography" | "motion" }[] = [
   { key: "color", icon: "palette", title: "colors" },
   { key: "shape", icon: "rounded_corner", title: "shape" },
   { key: "type", icon: "text_fields", title: "typography" },
   { key: "motion", icon: "animation", title: "motion" },
-  { key: "ai", icon: "auto_awesome", title: "ai" },
 ];
 
-export default function Editor({ initialLang, onReady }: { initialLang: Lang; onReady?: () => void }) {
+/** what the page has to say about how the project came to be open */
+/** `unsaved`: this visit runs without storage, so nothing outlives the tab. `unkept`: storage
+ *  is there but would not take what this visit opened, so that is on screen unsaved. */
+export type EditorNotice = "arrived" | "missing" | "invalid" | "unsaved" | "unkept";
+
+export default function Editor({
+  initialLang,
+  project,
+  backend,
+  notice,
+  onArrive,
+  onReady,
+}: {
+  initialLang: Lang;
+  /** the project this editor works on, as the page read it; the editor is mounted anew for another one */
+  project: Project;
+  backend: Backend;
+  notice?: EditorNotice;
+  /** a design that arrived while this project holds work: the page opens it as a project of its own */
+  /** hands a design on to become a project of its own; settles false when it could not be stored */
+  onArrive: (doc: Doc) => Promise<boolean>;
+  onReady?: () => void;
+}) {
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
+  const onArriveRef = useRef(onArrive);
+  onArriveRef.current = onArrive;
+  const router = useRouter();
+  /** tell the author that changes are not reaching storage, and note when they do again */
+  const saveFailedRef = useRef<() => void>(() => {});
+  const saveOkRef = useRef<() => void>(() => {});
+  const writtenRef = useRef<() => void>(() => {});
+  const [saver] = useState(() =>
+    createSaver(backend, project.meta, {
+      /* a project that already has a document is not written back as it was opened */
+      stored: project.doc !== null,
+      onError: () => saveFailedRef.current(),
+      onSaved: () => saveOkRef.current(),
+      onWritten: () => writtenRef.current(),
+    }),
+  );
+  /* While the editor is on screen its saver writes. Once the editor is left it stops, and hands
+     on what it could not write, so nothing lands later on top of newer work. */
+  useEffect(() => {
+    saver.attach();
+    return () => saver.dispose();
+  }, [saver]);
+  /* A change still on its way to storage, one storage has refused, or work in a browser that
+     keeps nothing: closing the tab now would lose it, so the browser asks first. */
+  useEffect(() => {
+    const warn = (e: BeforeUnloadEvent) => {
+      if (!saver.pending() && !(backend.kind === "memory" && saver.meta().edited)) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [saver, backend]);
   /* ---------- document ---------- */
   const [lang, setLang] = useState<Lang>(initialLang);
   const [editAccess, setEditAccess] = useState<"checking" | "editable" | "readonly">("checking");
@@ -525,8 +592,6 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
   const [promptCoverUp, setPromptCoverUp] = useState(false);
   /** the author's explicit target; null follows the screens (web once a desktop screen exists) */
   const [platform, setPlatform] = useState<Platform | null>(null);
-  /** a project file waiting for the author to confirm replacing the canvas */
-  const [pendingImport, setPendingImport] = useState<Doc | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   /** the idea typed into the "ask an AI" dialog; kept here so a failed draft does not lose it */
   const [ideaText, setIdeaText] = useState("");
@@ -558,11 +623,31 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
   const [rightOpen, setRightOpen] = useState(true);
   const [leftW, setLeftW] = useState(RAIL_W + 268);
   const [leftTab, setLeftTab] = useState<LeftTab>("parts");
+  /** the axis of the theme its tab shows */
+  const [themeTab, setThemeTab] = useState<ThemeTab>("color");
   /** pointer over the collapsed rail: the logo becomes the open button */
   const [railHover, setRailHover] = useState(false);
   /** the screen whose layers are listed when nothing on a screen is selected */
   const [layersFrameId, setLayersFrameId] = useState<string | null>(null);
   const [rightW, setRightW] = useState(320);
+  /** The right panel keeps what is in it while it slides shut, and lets go of it once it has. */
+  const [rightKept, setRightKept] = useState(true);
+  /** the button that reopens the right panel, and the one that closes it: closing or opening
+   *  takes away the button that was pressed, so the focus is handed to its counterpart */
+  const reopenRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLSpanElement>(null);
+  const toggleRight = (open: boolean) => {
+    setRightOpen(open);
+    requestAnimationFrame(() => (open ? closeRef : reopenRef).current?.querySelector("button")?.focus({ preventScroll: true }));
+  };
+  useEffect(() => {
+    if (rightOpen) {
+      setRightKept(true);
+      return;
+    }
+    const id = window.setTimeout(() => setRightKept(false), PANEL_MS + 40);
+    return () => window.clearTimeout(id);
+  }, [rightOpen]);
   const [rightTab, setRightTab] = useState<"edit" | "prompt">("edit");
   const [favorites, setFavorites] = useState<Kind[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -605,6 +690,9 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
   widthsRef.current = widths;
   const viewRef = useRef(view);
   viewRef.current = view;
+  const reducedMotion = useReducedMotion();
+  const reducedMotionRef = useRef(reducedMotion);
+  reducedMotionRef.current = reducedMotion;
   const previewIdRef = useRef(previewId);
   previewIdRef.current = previewId;
   const leftOpenRef = useRef(leftOpen);
@@ -709,8 +797,9 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
 
   /* ---------- persistence ---------- */
   useEffect(() => {
-    /* The first tab keeps this promise pending for its lifetime. Later tabs get
-       `null` immediately and stay read-only until they are reloaded. Where the
+    /* The first tab on a project keeps this promise pending for its lifetime. Later
+       tabs on the same project get `null` immediately and stay read-only until they
+       are reloaded; a tab on another project is not in their way. Where the
        browser has no locks (an insecure origin, an old WebKit) the editor works
        as it always did, without the guard. */
     if (!navigator.locks) {
@@ -724,7 +813,7 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
     queueMicrotask(() => {
       if (!active) return;
       void navigator.locks
-        .request(DOC_LOCK, { ifAvailable: true }, async (lock) => {
+        .request(lockName(project.meta.id), { ifAvailable: true }, async (lock) => {
           if (!active) return;
           if (!lock) {
             setEditAccess("readonly");
@@ -788,18 +877,15 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
     // React's development double-run would otherwise read back its own first save
     if (loadedRef.current) return;
     try {
-      const d = localStorage.getItem(DOC_KEY);
+      const d = project.doc;
       if (d) {
         hadDocRef.current = true;
-        applyDoc(JSON.parse(d) as Partial<Doc>, false);
+        applyDoc(d as Partial<Doc>, false);
         // frame mode is decided by the device (media-query effect), not restored
-      }
-      const before = d ? localStorage.getItem(BEFORE_KEY) : null;
-      if (!d) localStorage.removeItem(BEFORE_KEY);
-      if (before) {
-        const value: unknown = JSON.parse(before);
-        if (isProject(value)) setDraftBefore(value);
-        else localStorage.removeItem(BEFORE_KEY);
+        if (project.before) setDraftBefore(project.before);
+      } else if (project.meta.title) {
+        /* named in the projects list before it was ever opened */
+        setTitle(project.meta.title);
       }
       const u = localStorage.getItem(UI_KEY);
       if (u) {
@@ -909,13 +995,8 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
 
   useEffect(() => {
     if (!loadedRef.current || editAccess !== "editable") return;
-    try {
-      localStorage.setItem(
-        DOC_KEY,
-        JSON.stringify({ groups, frames, paletteKey, frame, title, brief, promptEdit, promptOptions, platform: platform ?? undefined, customPalette: customPalette ?? undefined, dynamicColor, theme }),
-      );
-    } catch {}
-  }, [editAccess, groups, frames, paletteKey, frame, title, brief, promptEdit, promptOptions, platform, customPalette, dynamicColor, theme]);
+    saver.push({ groups, frames, paletteKey, frame, title, brief, promptEdit, promptOptions, platform: platform ?? undefined, customPalette: customPalette ?? undefined, dynamicColor, theme });
+  }, [saver, editAccess, groups, frames, paletteKey, frame, title, brief, promptEdit, promptOptions, platform, customPalette, dynamicColor, theme]);
 
   useEffect(() => {
     if (!loadedRef.current) return;
@@ -1037,9 +1118,140 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
     });
   }, []);
 
-  const fit = useCallback(() => {
+  /* ---------- the camera in motion ---------- */
+  /** the eased move the view is making: where it is heading, and where it has got to. The page
+   *  draws a frame behind, so a move that takes over from this one starts from `at`, not from
+   *  the view last drawn. */
+  const cameraRef = useRef<{ raf: number; to: View; at: View } | null>(null);
+  /** a wheel zoom still closing on its target, the point of the canvas it holds still, and
+   *  where the view has got to */
+  const wheelZoomRef = useRef<{ z: number; px: number; py: number; ease: number; raf: number; last: number; at: View } | null>(null);
+  /** the view as the camera last left it, whichever way it was moving */
+  const cameraAt = () => cameraRef.current?.at ?? wheelZoomRef.current?.at ?? viewRef.current;
+  const stopCamera = useCallback(() => {
+    if (cameraRef.current) cancelAnimationFrame(cameraRef.current.raf);
+    cameraRef.current = null;
+    if (wheelZoomRef.current) cancelAnimationFrame(wheelZoomRef.current.raf);
+    wheelZoomRef.current = null;
+    /* a glide's own easing is a transition on the same transform: left on, it would be
+       restarted by every frame of whatever moves the view next */
+    setCameraEasing(false);
+  }, []);
+  useEffect(() => stopCamera, [stopCamera]);
+
+  /** Eases the view to `to`. The zoom changes by equal ratios over equal times and the point in
+   *  the middle of the canvas travels in a straight line, so a zoom about the middle holds the
+   *  middle still. With reduced motion the view is simply set. */
+  const easeView = useCallback(
+    (to: View) => {
+      const from = cameraAt();
+      stopCamera();
+      const r = canvasRect();
+      if (!r || reducedMotionRef.current || (from.x === to.x && from.y === to.y && from.z === to.z)) {
+        setView(to);
+        return;
+      }
+      const w = r.width / 2;
+      const h = r.height / 2;
+      const c0 = { x: (w - from.x) / from.z, y: (h - from.y) / from.z };
+      const c1 = { x: (w - to.x) / to.z, y: (h - to.y) / to.z };
+      const start = performance.now();
+      const tick = (now: number) => {
+        /* a frame may be stamped a moment before the press that started this: never less than nothing */
+        const at = Math.min(1, Math.max(0, (now - start) / CAMERA_MS));
+        if (at >= 1) {
+          cameraRef.current = null;
+          setView(to);
+          return;
+        }
+        const s = 1 - Math.pow(1 - at, 3);
+        const z = from.z * Math.pow(to.z / from.z, s);
+        const next = { x: w - (c0.x + (c1.x - c0.x) * s) * z, y: h - (c0.y + (c1.y - c0.y) * s) * z, z };
+        setView(next);
+        cameraRef.current = { raf: requestAnimationFrame(tick), to, at: next };
+      };
+      cameraRef.current = { raf: requestAnimationFrame(tick), to, at: from };
+    },
+    [stopCamera],
+  );
+
+  /** Zooms about the middle of the canvas by `factor`, easing there. Presses made while the
+   *  view is still moving add up from where it is heading, not from where it has got to. */
+  const zoomBy = useCallback(
+    (factor: number) => {
+      const r = canvasRect();
+      const base = cameraRef.current?.to ?? viewRef.current;
+      const z = clamp(base.z * factor, MIN_Z, MAX_Z);
+      const w = (r?.width ?? 0) / 2;
+      const h = (r?.height ?? 0) / 2;
+      easeView({ x: w - ((w - base.x) * z) / base.z, y: h - ((h - base.y) * z) / base.z, z });
+    },
+    [easeView],
+  );
+  const zoomByRef = useRef(zoomBy);
+  zoomByRef.current = zoomBy;
+
+  /** A step of zoom from the wheel or a trackpad pinch, about the pointer. The step moves the
+   *  target; the view closes on it frame by frame, so a wheel's notches run together instead
+   *  of jumping, and the point under the pointer stays under it all the way. */
+  const zoomWheel = useCallback(
+    (deltaY: number, cx: number, cy: number) => {
+      const r = canvasRect();
+      if (!r) return;
+      /* where an eased move had got to, if the wheel cuts in on one */
+      const taken = cameraRef.current?.at;
+      if (cameraRef.current) {
+        cancelAnimationFrame(cameraRef.current.raf);
+        cameraRef.current = null;
+      }
+      const going = wheelZoomRef.current;
+      const z = clamp((going?.z ?? (taken ?? viewRef.current).z) * Math.exp(-deltaY * 0.0022), MIN_Z, MAX_Z);
+      if (reducedMotionRef.current) {
+        setZoomAt(z, cx, cy);
+        return;
+      }
+      const px = cx - r.left;
+      const py = cy - r.top;
+      const ease = Math.abs(deltaY) < 30 ? PINCH_EASE_MS : WHEEL_EASE_MS;
+      if (going) {
+        Object.assign(going, { z, px, py, ease });
+        return;
+      }
+      /* the view as this loop last left it, and every view it has set: the page may not have
+         drawn the latest yet, and one of the loop's own must not be mistaken for a move made
+         elsewhere */
+      let v = taken ?? viewRef.current;
+      const mine = new WeakSet<View>([v, viewRef.current]);
+      const state = { z, px, py, ease, raf: 0, last: performance.now(), at: v };
+      const tick = (now: number) => {
+        const drawn = viewRef.current;
+        /* something else moved the view meanwhile, a pan or a pinch: carry on from there */
+        if (!mine.has(drawn)) {
+          v = drawn;
+          mine.add(drawn);
+        }
+        const dt = Math.min(64, Math.max(1, now - state.last));
+        state.last = now;
+        let nz = v.z * Math.pow(state.z / v.z, 1 - Math.exp(-dt / state.ease));
+        const done = Math.abs(Math.log(state.z / nz)) < 0.0015;
+        if (done) nz = state.z;
+        v = { x: state.px - ((state.px - v.x) * nz) / v.z, y: state.py - ((state.py - v.y) * nz) / v.z, z: nz };
+        mine.add(v);
+        state.at = v;
+        setView(v);
+        if (done) wheelZoomRef.current = null;
+        else state.raf = requestAnimationFrame(tick);
+      };
+      state.raf = requestAnimationFrame(tick);
+      wheelZoomRef.current = state;
+    },
+    [setZoomAt],
+  );
+
+  /** the view that shows the whole design */
+  const fitView = useCallback((): View | null => {
     const r = canvasRect();
-    if (!r) return;
+    if (!r) return null;
     const gs = groupsRef.current;
     let x0 = -BEZEL;
     let y0 = -BEZEL - FRAME_LABEL_H;
@@ -1053,10 +1265,7 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
       y1 = Math.max(...fs.map((f) => frameRect(f).b)) + BEZEL;
     }
     if (frameRef.current === "blank") {
-      if (gs.length === 0) {
-        setView({ x: 48, y: 48, z: 1 });
-        return;
-      }
+      if (gs.length === 0) return { x: 48, y: 48, z: 1 };
       x0 = Infinity;
       y0 = Infinity;
       x1 = -Infinity;
@@ -1077,8 +1286,7 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
     if (mobile) {
       // a phone zooms to the screen's width and starts at its top; the rest scrolls
       const z = clamp((r.width - pad * 2) / (x1 - x0), MIN_Z, MAX_Z);
-      setView({ x: (r.width - (x1 - x0) * z) / 2 - x0 * z, y: top - y0 * z, z });
-      return;
+      return { x: (r.width - (x1 - x0) * z) / 2 - x0 * z, y: top - y0 * z, z };
     }
     const z = clamp(
       Math.min(
@@ -1089,20 +1297,34 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
       MIN_Z,
       MAX_Z,
     );
-    setView({
+    return {
       x: (r.width - (x1 - x0) * z) / 2 - x0 * z,
       y: top + (r.height - top - bottom - (y1 - y0) * z) / 2 - y0 * z,
       z,
-    });
+    };
   }, []);
+  /** shows the whole design at once: a design that has just arrived is simply there */
+  const fit = useCallback(() => {
+    stopCamera();
+    const v = fitView();
+    if (v) setView(v);
+  }, [fitView, stopCamera]);
   const fitRef = useRef(fit);
   fitRef.current = fit;
+  /** the same, eased: the author asked for it and watches the camera go */
+  const fitEased = useCallback(() => {
+    const v = fitView();
+    if (v) easeView(v);
+  }, [fitView, easeView]);
+  const fitEasedRef = useRef(fitEased);
+  fitEasedRef.current = fitEased;
 
   /* touch: two fingers pinch-zoom and pan, cancelling whatever one finger started */
   const onTouchCapture = (e: React.PointerEvent) => {
     if (e.pointerType !== "touch") return;
     touchesRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (touchesRef.current.size === 2) {
+      stopCamera();
       const [a, b] = [...touchesRef.current.values()];
       const v = viewRef.current;
       pinchRef.current = {
@@ -1163,18 +1385,15 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       if (e.ctrlKey || e.metaKey) {
-        setZoomAt(
-          viewRef.current.z * Math.exp(-e.deltaY * 0.0022),
-          e.clientX,
-          e.clientY,
-        );
+        zoomWheel(e.deltaY, e.clientX, e.clientY);
       } else {
+        stopCamera();
         setView((v) => ({ ...v, x: v.x - e.deltaX, y: v.y - e.deltaY }));
       }
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [setZoomAt]);
+  }, [zoomWheel, stopCamera]);
 
   /* ---------- rest positions and the magnet ---------- */
   const restPos = useCallback(
@@ -1304,6 +1523,7 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
   useEffect(() => () => flushPending(), [flushPending]);
 
   const startPan = (clientX: number, clientY: number) => {
+    stopCamera();
     const g: Gesture = {
       kind: "pan",
       sx: clientX,
@@ -2695,9 +2915,7 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
       return;
     setDraftBefore(null);
     setQuickUndo(false);
-    try {
-      localStorage.removeItem(BEFORE_KEY);
-    } catch {}
+    saver.hold(null);
     snapshot();
     setGroups([]);
     setFrames([]);
@@ -2705,8 +2923,8 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
     setSelectedFrameId(null);
   };
 
-  /** Opening a project file replaces the canvas with the same restore path the saved
-   *  document goes through, then starts the editor fresh on it. */
+  /** Puts another design on the canvas through the same restore path the saved document
+   *  goes through, then starts the editor fresh on it. */
   const importDoc = (next: Doc) => {
     hadDocRef.current = true;
     /* the whole document being replaced stays one undo away */
@@ -2714,9 +2932,7 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
     /* whatever was under review is over: a file, a clear or a new arrival replaces it */
     setDraftBefore(null);
     setQuickUndo(false);
-    try {
-      localStorage.removeItem(BEFORE_KEY);
-    } catch {}
+    saver.hold(null);
     applyDoc(next, true);
     if (!mobileRef.current) {
       const nextFrame = next.frame === "blank" ? "blank" : "phone";
@@ -2731,10 +2947,11 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
     queueMicrotask(() => fitRef.current());
   };
 
-  /* A link with a design in its hash offers it once the editor is ready to take it,
-     whether the page opened on that link or the link was pasted into this tab. */
+  /* A link pasted into this tab carries a design in its hash. (A page that opens on such a
+     link has already taken the design before the editor is mounted.) A read-only tab can
+     still pass it on: the design opens as a project of its own. */
   useEffect(() => {
-    if (editAccess !== "editable" || typeof window === "undefined") return;
+    if (editAccess === "checking" || typeof window === "undefined") return;
     let active = true;
     const offer = () => {
       if (!hasShareHash(window.location.hash)) return;
@@ -2742,8 +2959,9 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
         if (!active) return;
         if (next) {
           setShareOpen(false);
-          arrive(next);
           clearShareHash();
+          if (editAccess === "editable") receive(next);
+          else pass(next);
         } else {
           clearShareHash();
           showToast(t("invalidProject", getLang()), 3000, "error");
@@ -2759,13 +2977,23 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editAccess]);
 
-  /** Asks the author's own model for a design and puts it on the canvas. The guide it reads
-   *  is the one a coding agent reads (public/agent.md). The replaced design waits in
-   *  `draftBefore` until the author keeps or undoes the draft. */
-  /** A design that arrived from a model or a link takes the canvas with its colours easing
+  /** A design from a link or a file. A project the author has not touched takes it in
+   *  place; one that holds work is left alone, and the design opens as a project of its own. */
+  const receive = (next: Doc) => {
+    if (saver.meta().edited) pass(next);
+    else importDoc(next);
+  };
+  /** hands a design on to become a project of its own, and says so when it could not be kept */
+  const pass = (next: Doc) =>
+    void onArriveRef.current(next).then(
+      (kept) => !kept && showToast(t("saveFailed", getLang()), 5000, "error"),
+      () => showToast(t("saveFailed", getLang()), 5000, "error"),
+    );
+
+  /** A design drafted by the author's own model takes the canvas with its colours easing
    *  over; the design it replaced waits in `draftBefore` until the author keeps or undoes it. */
   const arrive = (next: Doc) => {
-    /* the phone editor has no keep / undo buttons: a link simply opens there, undoable as usual */
+    /* the phone editor has no keep / undo buttons: a draft simply opens there, undoable as usual */
     if (mobileRef.current) {
       importDoc(next);
       return;
@@ -2776,11 +3004,11 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
     revealTimer.current = setTimeout(() => setRevealing(false), 900);
     importDoc(next);
     setDraftBefore(before);
-    try {
-      localStorage.setItem(BEFORE_KEY, JSON.stringify(before));
-    } catch {}
+    saver.hold(before);
   };
 
+  /** Asks the author's own model for a design and puts it on the canvas. The guide it reads
+   *  is the one a coding agent reads (public/agent.md). */
   const startDraft = async (idea: string) => {
     setShareOpen(false);
     setDraftBusy(true);
@@ -2804,9 +3032,7 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
   const keepDraft = () => {
     setDraftBefore(null);
     setQuickUndo(true);
-    try {
-      localStorage.removeItem(BEFORE_KEY);
-    } catch {}
+    saver.hold(null);
   };
   const undoDraft = () => {
     if (draftBefore) {
@@ -2955,6 +3181,8 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
   };
 
   const addFrame = () => {
+    /* the view is about to be set on the new screen: an eased move still running must not undo it */
+    stopCamera();
     snapshot();
     const base = framesRef.current[0];
     const f: Frame = {
@@ -3143,6 +3371,35 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
     toastTimer.current = window.setTimeout(() => setToast(null), ms);
   };
 
+  /* said at once, then again each minute for as long as writes keep failing: one notice an
+     hour ago is not a warning */
+  const saveFailedAt = useRef(0);
+  saveFailedRef.current = () => {
+    const at = Date.now();
+    if (at - saveFailedAt.current < 60_000) return;
+    saveFailedAt.current = at;
+    showToast(t("saveFailed", getLang()), 5000, "error");
+  };
+  saveOkRef.current = () => {
+    saveFailedAt.current = 0;
+  };
+  /* the author's work has reached storage: the moment to ask the browser to hold on to it,
+     once a visit. A project nobody has changed yet is not work to ask about. */
+  const keepAsked = useRef(false);
+  writtenRef.current = () => {
+    if (keepAsked.current || backend.kind !== "idb" || !saver.meta().edited) return;
+    keepAsked.current = true;
+    void keepStored(smallStorage());
+  };
+  useEffect(() => {
+    if (notice === "unkept") showToast(t("saveFailed", getLang()), 8000, "error");
+    else if (notice === "unsaved" || backend.kind === "memory") showToast(t("storageUnavailable", getLang()), 8000, "error");
+    else if (notice === "arrived") showToast(t("openedAsProject", getLang()), 2600, "check");
+    else if (notice === "missing") showToast(t("projectMissing", getLang()), 3200, "error");
+    else if (notice === "invalid") showToast(t("invalidProject", getLang()), 3000, "error");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const updateAiSettings = (s: AiSettings) => {
     setAiSettings(s);
     saveAiSettings(s);
@@ -3308,77 +3565,8 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
     }
   };
 
-  /** the runs of one screen drawn with plain divs: the export layer */
-  const renderExport = (f: Frame) => {
-    const gs = groups.filter((g) => frameOfGroup(g, frames, widths)?.id === f.id);
-    const { w } = frameSizeOf(f);
-    const h = frameLengthOf(f);
-    return (
-      <div
-        data-export={f.id}
-        style={{
-          position: "relative",
-          width: w,
-          height: h,
-          background: p[f.bg ?? "surface"],
-          overflow: "hidden",
-        }}
-      >
-        {gs.map((g) =>
-          g.free ? (
-            ((corners) =>
-            layoutOf(g, widths).map((pl) => (
-              <div key={pl.item.id} style={{ position: "absolute", left: pl.x - f.x, top: pl.y - f.y, zIndex: modalRailOf(g) ? 2 : undefined }}>
-                <M3Static
-                  item={pl.item}
-                  palette={p}
-                  radii={corners.get(pl.item.id)}
-                  style={MEASURED.includes(pl.item.kind) ? undefined : { width: pl.w, height: pl.h }}
-                />
-              </div>
-            )))(freeRadii(g, widths))
-          ) : (
-          <div
-            key={g.id}
-            style={{
-              position: "absolute",
-              left: g.x - f.x,
-              top: g.y - f.y,
-              zIndex: modalRailOf(g) ? 2 : undefined,
-              display: "flex",
-              flexDirection: g.axis === "x" ? "row" : "column",
-              alignItems: g.axis === "x" ? "center" : "stretch",
-              gap: GAP,
-            }}
-          >
-            {g.items.map((it, i) => {
-              const conn = connectSpecOf(it);
-              const n = g.items.length;
-              const radii =
-                conn && n > 1
-                  ? runRadii(g.axis, i === 0, i === n - 1, false, false, 0, conn.outer, conn.inner)
-                  : conn
-                    ? uniformRadii(conn.outer)
-                    : baseRadii(it);
-              return (
-                <M3Static
-                  key={it.id}
-                  item={it}
-                  palette={p}
-                  radii={radii}
-                  style={MEASURED.includes(it.kind) ? undefined : { width: sizeOf(it, widths).w, height: sizeOf(it, widths).h }}
-                />
-              );
-            })}
-          </div>
-          ),
-        )}
-        {gs.some((g) => modalRailOf(g)) && (
-          <div aria-hidden style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.32)", pointerEvents: "none", zIndex: 1 }} />
-        )}
-      </div>
-    );
-  };
+  /** the screen drawn with plain parts: the export layer */
+  const renderExport = (f: Frame) => <FrameStatic frame={f} groups={groups} frames={frames} widths={widths} palette={p} exportId={f.id} />;
 
   /** the view before the preview opened, restored when it closes */
   const viewBeforePreview = useRef<View | null>(null);
@@ -3397,6 +3585,7 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
   /** the camera glides for a moment: a screen is brought to the center before the
    *  preview opens over it, and the view returns once the preview closes */
   const glide = (v: View) => {
+    stopCamera();
     setCameraEasing(true);
     setView(v);
     window.setTimeout(() => setCameraEasing(false), SETTLE_MS + 40);
@@ -3486,7 +3675,7 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
           t.isContentEditable);
       if (typing) return;
       // dialogs, the preview and the prompt's full-screen cover own the keyboard while they are up
-      if (confirmClear || pendingImport !== null || shareOpen || previewId !== null || promptCoverUp) return;
+      if (confirmClear || shareOpen || previewId !== null || promptCoverUp) return;
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
@@ -3561,9 +3750,9 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
       if (mod) return;
       if (e.key === "v" || e.key === "V") setMode("select");
       if (e.key === "h" || e.key === "H") setMode("hand");
-      if (e.key === "=" || e.key === "+") setZoomAt(viewRef.current.z * 1.2);
-      if (e.key === "-" || e.key === "_") setZoomAt(viewRef.current.z / 1.2);
-      if (e.key === "0") fitRef.current();
+      if (e.key === "=" || e.key === "+") zoomByRef.current(1.2);
+      if (e.key === "-" || e.key === "_") zoomByRef.current(1 / 1.2);
+      if (e.key === "0") fitEasedRef.current();
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.key === " ") setSpaceHeld(false);
@@ -3595,7 +3784,6 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
     selectedFrameId,
     deleteFrame,
     confirmClear,
-    pendingImport,
     shareOpen,
     previewId,
     promptCoverUp,
@@ -4223,6 +4411,18 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
             >
               {!leftOpen && railHover ? (
                 <IconBtn icon="left_panel_open" p={p} on onClick={() => setLeftOpen(true)} title={t("openPanel", lang)} size={40} />
+              ) : leftOpen ? (
+                /* with the panel open the mark is a second way out to the projects list: pointed
+                   at, the layers in it turn into the list's own icon */
+                <button
+                  onClick={() => router.push("/projects")}
+                  title={t("projects", lang)}
+                  aria-label={t("projects", lang)}
+                  className="m3e-logo-hit m3-press"
+                  style={{ width: 40, height: 40, flex: "0 0 auto", display: "grid", placeItems: "center", padding: 0, border: "none", borderRadius: 20, background: "transparent", cursor: "pointer" }}
+                >
+                  <LogoSwap p={p} icon="grid_view" />
+                </button>
               ) : (
                 <div
                   onClick={() => !leftOpen && setLeftOpen(true)}
@@ -4231,21 +4431,42 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
                   <Logo size={32} color={p.primary} glyph={p.onPrimary} />
                 </div>
               )}
-              <div style={{ height: 6 }} />
-              {LEFT_TABS.map((tab, i) => (
-                <div key={tab.key} style={{ marginTop: i === 2 || i === 6 ? 10 : 0 }}>
-                  <IconBtn
-                    icon={tab.icon}
-                    p={p}
-                    on={leftOpen && leftTab === tab.key}
-                    onClick={() => {
-                      setLeftTab(tab.key);
-                      setLeftOpen(true);
-                    }}
-                    title={t(tab.title, lang)}
-                    size={44}
-                  />
-                </div>
+              {/* The way out to the projects list is not one of the tabs, and does not look like one:
+                  a squared container of its own, with a little room before the tabs begin. */}
+              <button
+                onClick={() => router.push("/projects")}
+                title={t("projects", lang)}
+                aria-label={t("projects", lang)}
+                className="m3-press"
+                style={{
+                  width: 44,
+                  height: 44,
+                  flex: "0 0 auto",
+                  display: "grid",
+                  placeItems: "center",
+                  marginBottom: 8,
+                  border: "none",
+                  borderRadius: 14,
+                  background: p.surfaceContainerHighest,
+                  color: p.onSurface,
+                  cursor: "pointer",
+                }}
+              >
+                <Icon name="grid_view" size={22} />
+              </button>
+              {LEFT_TABS.map((tab) => (
+                <IconBtn
+                  key={tab.key}
+                  icon={tab.icon}
+                  p={p}
+                  on={leftOpen && leftTab === tab.key}
+                  onClick={() => {
+                    setLeftTab(tab.key);
+                    setLeftOpen(true);
+                  }}
+                  title={t(tab.title, lang)}
+                  size={44}
+                />
               ))}
               <div style={{ flex: 1 }} onClick={() => !leftOpen && setLeftOpen(true)} />
               <LangMenu p={p} onLang={changeLanguage} side="right" size={44} />
@@ -4270,6 +4491,8 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
                   }}
                 >
                   {t(LEFT_TABS.find((x) => x.key === leftTab)?.title ?? "parts", lang)}
+                  {/* the theme's tab says which of its axes is open */}
+                  {leftTab === "theme" && <span style={{ fontWeight: 500, color: p.onSurfaceVariant }}>{` · ${t(THEME_TABS.find((x) => x.key === themeTab)?.title ?? "colors", lang)}`}</span>}
                 </span>
                 <IconBtn
                   icon="left_panel_close"
@@ -4278,6 +4501,11 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
                   title={t("closePanel", lang)}
                 />
               </div>
+              {leftTab === "theme" && (
+                <div style={{ padding: "10px 12px 2px", flex: "0 0 auto" }}>
+                  <Segmented options={THEME_TABS.map((x) => ({ key: x.key, icon: x.icon, title: t(x.title, lang) }))} value={themeTab} onChange={setThemeTab} p={p} label={t("theme", lang)} />
+                </div>
+              )}
               <div style={{ flex: 1, minHeight: 0 }}>
                 {leftTab === "parts" ? (
                   <PartsPalette
@@ -4291,7 +4519,7 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
                     onPartPointerDown={onPartPointerDown}
                     onPartActivate={addPart}
                   />
-                ) : leftTab === "color" ? (
+                ) : leftTab === "theme" && themeTab === "color" ? (
                   <ColorPanel
                     p={p}
                     paletteKey={paletteKey}
@@ -4303,11 +4531,11 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
                     theme={theme}
                     onTheme={patchTheme}
                   />
-                ) : leftTab === "shape" ? (
+                ) : leftTab === "theme" && themeTab === "shape" ? (
                   <ShapePanel p={p} theme={theme} onChange={patchTheme} />
-                ) : leftTab === "type" ? (
+                ) : leftTab === "theme" && themeTab === "type" ? (
                   <TypePanel p={p} theme={theme} onChange={patchTheme} />
-                ) : leftTab === "motion" ? (
+                ) : leftTab === "theme" ? (
                   <MotionPanel p={p} theme={theme} onChange={patchTheme} />
                 ) : leftTab === "ai" ? (
                   <AiPanel p={p} settings={aiSettings} onSettings={updateAiSettings} />
@@ -4731,8 +4959,8 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
             frame={frame}
             onFrame={changeFrame}
             zoom={view.z}
-            onZoom={(z) => setZoomAt(z)}
-            onFit={fit}
+            onZoom={(z) => zoomBy(z / viewRef.current.z)}
+            onFit={fitEased}
             canUndo={pastRef.current.length > 0}
             canRedo={futureRef.current.length > 0}
             onUndo={undo}
@@ -4880,13 +5108,14 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
 
           {!rightOpen && !isMobile && (
             <div
+              ref={reopenRef}
               style={{ position: "absolute", right: 20, top: 20, zIndex: 45 }}
             >
               <IconBtn
                 icon="right_panel_open"
                 p={p}
                 on
-                onClick={() => setRightOpen(true)}
+                onClick={() => toggleRight(true)}
                 title={t("edit", lang)}
                 size={44}
               />
@@ -4895,8 +5124,17 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
         </main>
 
         {/* ---- right: inspector / prompt ---- */}
-        {showRight && (
-          <aside style={{ ...panelStyle, width: rightW }}>
+        {/* The panel slides: its width eases between nothing and its own, and what is in it
+            keeps that own width throughout, so nothing inside is squeezed on the way. It rides
+            the panel's left edge out of view and back. */}
+        {!isMobile && (
+          <aside
+            inert={!rightOpen || undefined}
+            aria-hidden={!rightOpen || undefined}
+            style={{ ...panelStyle, width: rightOpen ? rightW : 0, transition: resizing === "right" || reducedMotion ? undefined : `width ${PANEL_MS}ms cubic-bezier(0.2, 0, 0, 1)` }}
+          >
+          {(rightOpen || rightKept) && (
+          <div style={{ width: rightW, flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
             <div
               onPointerDown={(e) => {
                 e.preventDefault();
@@ -4942,13 +5180,15 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
               </div>
               {/* the same button in the same spot as the one that reopens the panel, but plain:
                 * the filled look belongs to the one that has to be found over the canvas */}
-              <IconBtn
-                icon="right_panel_close"
-                p={p}
-                size={44}
-                onClick={() => setRightOpen(false)}
-                title={t("closePanel", lang)}
-              />
+              <span ref={closeRef} style={{ display: "contents" }}>
+                <IconBtn
+                  icon="right_panel_close"
+                  p={p}
+                  size={44}
+                  onClick={() => toggleRight(false)}
+                  title={t("closePanel", lang)}
+                />
+              </span>
             </div>
             <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
               {/* what scrolls past the top of the panel dissolves into the band instead of being cut */}
@@ -5033,6 +5273,8 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
                 />
               )}
             </div>
+          </div>
+          )}
           </aside>
         )}
 
@@ -5044,20 +5286,7 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
           onChange={(e) => {
             const file = e.target.files?.[0];
             e.target.value = "";
-            if (file) void readProject(file).then((next) => (next ? setPendingImport(next) : showToast(t("invalidProject", lang), 3000, "error")));
-          }}
-        />
-
-        <ConfirmDialog
-          open={pendingImport !== null}
-          icon="file_open"
-          title={t("replaceProjectTitle", lang)}
-          body={t("replaceProject", lang)}
-          p={p}
-          onCancel={() => setPendingImport(null)}
-          onConfirm={() => {
-            if (pendingImport) importDoc(pendingImport);
-            setPendingImport(null);
+            if (file) void readProject(file).then((next) => (next ? receive(next) : showToast(t("invalidProject", lang), 3000, "error")));
           }}
         />
 
@@ -5133,7 +5362,24 @@ export default function Editor({ initialLang, onReady }: { initialLang: Lang; on
               <p style={{ margin: 0, color: p.onSurfaceVariant, fontSize: 14, lineHeight: 1.5 }}>
                 {t("readOnlyBody", lang)}
               </p>
-              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 24 }}>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 24 }}>
+                <button
+                  className="m3-press"
+                  onClick={() => router.push("/projects")}
+                  style={{
+                    minHeight: 40,
+                    padding: "0 16px",
+                    border: "none",
+                    borderRadius: 20,
+                    background: "transparent",
+                    color: p.primary,
+                    fontSize: 14,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  {t("projects", lang)}
+                </button>
                 <button
                   autoFocus
                   className="m3-press"
